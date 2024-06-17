@@ -1,0 +1,175 @@
+from pysheds.grid import Grid
+import matplotlib.pyplot as plt
+import matplotlib.colors as colors
+import numpy as np
+from shapely.geometry import LineString
+import geopandas as gpd
+import matplotlib
+
+matplotlib.rc('font', family='DFKai-SB')#圖表中文
+
+grid = Grid.from_raster('木瓜溪高程圖 0607使用.tif')
+dem = grid.read_raster('木瓜溪高程圖 0607使用.tif')
+
+def plotFigure(data, label, cmap='Blues'):
+    plt.figure(figsize=(12,10))
+    plt.imshow(data, cmap)
+    plt.colorbar(label=label, shrink=0.6)
+    plt.grid()
+
+plotFigure(dem, 'Elevation (m)', 'terrain')
+
+# pre-process
+dem_view = grid.view(dem, nodata=np.nan)
+dem_view[dem_view == -32767] = np.nan
+
+# 窪地填平
+pit_filled_dem = grid.fill_pits(dem)
+flooded_dem = grid.fill_depressions(pit_filled_dem)
+inflated_dem = grid.resolve_flats(flooded_dem)
+
+# Specify directional mapping
+dirmap = (64, 128, 1, 2, 4, 8, 16, 32)
+fdir = grid.flowdir(inflated_dem, dirmap=dirmap)
+plotFigure(fdir, 'Direction (-)', 'Paired')
+
+# Flow accumulation
+acc = grid.accumulation(fdir, dirmap=dirmap)
+
+fig, ax = plt.subplots(figsize=(8,6))
+fig.patch.set_alpha(0)
+plt.grid('on', zorder=0)
+im = ax.imshow(acc, extent=grid.extent, zorder=2,
+               cmap='cubehelix',
+               norm=colors.LogNorm(1, acc.max()),
+               interpolation='bilinear')
+plt.colorbar(im, ax=ax, label='Upstream Cells')
+plt.title('Flow Accumulation', size=14)
+plt.xlabel('Longitude')
+plt.ylabel('Latitude')
+plt.tight_layout()
+
+# Specify pour point
+x, y = 288417, 2656134
+
+# Reset view
+grid.viewfinder = fdir.viewfinder
+
+# Compute accumulation
+acc = grid.accumulation(fdir)
+
+# Snap pour point to high accumulation cell
+x_snap, y_snap = grid.snap_to_mask(acc > 10000, (x, y))
+print(x_snap, y_snap)
+
+# Delineate the catchment
+catch = grid.catchment(x=x_snap, y=y_snap, fdir=fdir, xytype='coordinate')
+
+# Delineate the catchment
+#catch = grid.catchment(x=x, y=y, fdir=fdir, xytype='coordinate')
+
+# Plot the result
+grid.clip_to(catch)
+catch_view = grid.view(catch)
+
+# save as tif
+acc_catch = grid.accumulation(fdir,  dirmap=dirmap)
+grid.to_raster(dem, '木瓜溪高程圖 0607使用過.tif')
+
+import rasterio
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+# 堰塞湖集水區的.tif
+lakeRst = rasterio.open('木瓜溪高程圖 0607使用過.tif')
+
+# lakebottom
+lakeBottom = lakeRst.read(1)
+lakeBottom = lakeBottom.astype('float32')
+
+#replace value for np.nan
+noDataValue = np.copy(lakeBottom[0,0])
+lakeBottom[lakeBottom==noDataValue]= np.nan
+print(np.nanmin(lakeBottom))
+
+# 設定堰塞湖最高高程（這點很重要）把高程以上部分遮罩掉不用
+lakeBottom[lakeBottom > 700]= np.nan
+
+
+plt.figure(figsize=(12,12))
+plt.imshow(lakeBottom)
+plt.show()
+
+# get raster minimum and maximum
+minElev = np.nanmin(lakeBottom)
+maxElev = np.nanmax(lakeBottom)
+print('Min bottom elevation %.2f m., max bottom elevation %.2f m.'%(minElev,maxElev))
+
+# steps for calculation
+nSteps = 40
+
+# lake bottom elevation intervals
+elevSteps = np.round(np.linspace(minElev,maxElev,nSteps),2)
+elevSteps
+
+# definition of volume function
+def calculateVol(elevStep,elevDem,lakeRst):
+    tempDem = elevStep - elevDem[elevDem<elevStep]
+    tempVol = tempDem.sum()*lakeRst.res[0]*lakeRst.res[1]
+    return tempVol
+
+# calculate volumes for each elevation
+volArray = []
+for elev in elevSteps:
+    tempVol = calculateVol(elev,lakeBottom,lakeRst)
+    volArray.append(tempVol)
+
+print("Lake bottom elevations %s"%elevSteps)
+volArrayMCM = [round(i/1000000,2) for i in volArray]
+print("Lake volume in million of cubic meters %s"%volArrayMCM)
+
+# plot values
+fig, [ax1, ax2] = plt.subplots (1,2, figsize=(20,8), gridspec_kw={'width_ratios': [2, 1]})
+ax1.set_title('Lake bottom elevation')
+botElev=ax1.imshow(lakeBottom)
+
+divider = make_axes_locatable(ax1)
+cax = divider.append_axes('bottom', size='5%', pad=0.5)
+fig.colorbar(botElev, cax=cax, orientation='horizontal', label='Elevation (masl)')
+
+ax2.plot(volArrayMCM, elevSteps, label='Patillas lake')
+ax2.grid()
+ax2.legend()
+ax2.set_xlabel('Volume MCM')
+ax2.set_ylabel('Elevation (masl)')
+plt.show()
+
+
+
+#抓取30m時蓄水體積
+
+# 要選取的高程點
+selected_elevation = 630.00
+
+# 使用插值方法計算蓄水體積
+selected_volume = np.interp(selected_elevation, elevSteps, volArrayMCM)
+
+print(f"At elevation {selected_elevation} m, the interpolated water volume is {selected_volume:.2f} million cubic meters.")
+
+
+# 生成容積曲線圖
+plt.figure(figsize=(10, 6))
+plt.plot(volArrayMCM, elevSteps, label='Volume-Elevation Curve', marker='o')
+plt.xlabel('Volume (Million Cubic Meters)')
+plt.ylabel('Elevation (m)')
+plt.title('Volume-Elevation Curve')
+plt.grid(True)
+
+# 標註選取的點
+plt.scatter(selected_volume, selected_elevation, color='red', zorder=5)
+plt.annotate(f'{selected_volume:.2f} MCM\n{selected_elevation:.2f} m', 
+             (selected_volume, selected_elevation), 
+             textcoords="offset points", xytext=(0,10), ha='center', color='red')
+
+plt.legend()
+plt.show()
